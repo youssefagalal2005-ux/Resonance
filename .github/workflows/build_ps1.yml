@@ -1,0 +1,97 @@
+name: Build PS1 XMB Emulator PKG
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 1. Download Your Repository Files
+        uses: actions/checkout@v4
+
+      - name: 2. Auto-Convert Resonance Code to PS1 & Link mednafen_psx
+        run: |
+          python3 - << 'EOF'
+          import os, glob, re
+
+          # 1. تحويل جميع المسارات وصيغ الألعاب وخادم الأغلفة إلى PS1
+          files = glob.glob("port/**/*.*", recursive=True) + glob.glob("scripts/**/*.*", recursive=True)
+          for path in files:
+              if path.endswith(('.c', '.cpp', '.h', '.hpp', '.sh', '.py', '.ini')):
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      txt = f.read()
+                  new_txt = txt.replace("/data/Resonance", "/data/PS1XMB")
+                  new_txt = new_txt.replace("Resonance", "PS1-XMB")
+                  new_txt = new_txt.replace("Sega_-_Dreamcast", "Sony_-_PlayStation")
+                  new_txt = new_txt.replace("Sega - Dreamcast", "Sony - PlayStation")
+                  new_txt = new_txt.replace('".gdi"', '".pbp"')
+                  new_txt = new_txt.replace('".cdi"', '".m3u"')
+                  if new_txt != txt:
+                      with open(path, 'w', encoding='utf-8') as f:
+                          f.write(new_txt)
+
+          # 2. إنشاء دالة جسر تشغيل النواة mednafen_psx_libretro_ps4.self
+          bridge_code = '''
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <sys/stat.h>
+          extern "C" int sceSystemServiceLoadExec(const char *path, char *const argv[]);
+          static inline void LaunchPS1SelfCore(const char* rom_path) {
+              mkdir("/data/PS1XMB", 0777);
+              mkdir("/data/PS1XMB/system", 0777);
+              mkdir("/data/PS1XMB/saves", 0777);
+              mkdir("/data/PS1XMB/states", 0777);
+              FILE* f = fopen("/data/PS1XMB/retroarch.cfg", "w");
+              if (f) {
+                  fprintf(f, "system_directory = \\"/data/PS1XMB/system\\"\\n");
+                  fprintf(f, "savefile_directory = \\"/data/PS1XMB/saves\\"\\n");
+                  fprintf(f, "savestate_directory = \\"/data/PS1XMB/states\\"\\n");
+                  fprintf(f, "core_options_path = \\"/data/PS1XMB/core-options.cfg\\"\\n");
+                  fprintf(f, "video_fullscreen = \\"true\\"\\n");
+                  fprintf(f, "video_vsync = \\"true\\"\\n");
+                  fprintf(f, "menu_driver = \\"xmb\\"\\n");
+                  fprintf(f, "input_menu_toggle_gamepad_combo = \\"2\\"\\n");
+                  fclose(f);
+              }
+              FILE* co = fopen("/data/PS1XMB/core-options.cfg", "w");
+              if (co) {
+                  fprintf(co, "beetle_psx_internal_resolution = \\"2x\\"\\n");
+                  fprintf(co, "beetle_psx_pgxp_mode = \\"memory only\\"\\n");
+                  fclose(co);
+              }
+              const char* core = "/app0/cores/mednafen_psx_libretro_ps4.self";
+              char* const argv[] = { (char*)core, (char*)"-c", (char*)"/data/PS1XMB/retroarch.cfg", (char*)rom_path, NULL };
+              sceSystemServiceLoadExec(core, argv);
+          }
+          '''
+          with open("port/ps1_bridge.h", "w", encoding="utf-8") as f:
+              f.write(bridge_code)
+          print("PS1 Bridge Created Successfully!")
+          EOF
+
+      - name: 3. Install OpenOrbis SDK & Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake python3 ninja-build curl unzip wget dotnet-sdk-6.0
+          wget -q https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.2/toolchain-llvm-12.tar.gz
+          sudo mkdir -p /opt/openorbis
+          sudo tar -xzf toolchain-llvm-12.tar.gz -C /opt/openorbis
+          echo "OO_PS4_TOOLCHAIN=/opt/openorbis" >> $GITHUB_ENV
+
+      - name: 4. Bundle PS1 .self Cores & Build Package
+        run: |
+          mkdir -p pkg_build/cores
+          cp -f mednafen_psx_libretro_ps4.self pkg_build/cores/ || true
+          cp -f pcsx_rearmed_libretro_ps4.self pkg_build/cores/ || true
+          chmod +x scripts/*.sh || true
+          ./scripts/build.sh || true
+
+      - name: 5. Upload Ready PS1 Emulator Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS1-XMB-Emulator-Files
+          path: |
+            **/*.pkg
+            pkg_build/**
+            port/ps1_bridge.h
